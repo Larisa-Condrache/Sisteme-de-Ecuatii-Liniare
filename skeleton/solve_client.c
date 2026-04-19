@@ -70,7 +70,7 @@ static void init_sockaddr(struct sockaddr_in *name,
     }
     name->sin_family = AF_INET;
     name->sin_port   = htons(port);
-    name->sin_addr   = *(struct in_addr *)hostinfo->h_addr;
+    name->sin_addr   = *(struct in_addr *)hostinfo->h_addr_list[0];
 }
 
 static void print_usage(const char *prog)

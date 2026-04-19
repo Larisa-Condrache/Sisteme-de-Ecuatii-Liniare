@@ -89,6 +89,7 @@ typedef struct solveRequestHeader {
 typedef struct solveResponseHeader {
     msgHeaderType hdr;
     int32_t       status;     /* 0=ok, -1=singular, -2=alloc */
+    int32_t       n;          /* system order — needed by client to recv x */
 } solveResponseHeaderType;
 
 /* proto.c helpers for OPR_SOLVE */

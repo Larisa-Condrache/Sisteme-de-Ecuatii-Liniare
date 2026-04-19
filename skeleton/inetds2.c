@@ -12,6 +12,7 @@
  *   • Added proper return-value checks on every send/recv.
  */
 
+#include <errno.h>
 #include <pthread.h>
 #include <stdio.h>
 #include <stdlib.h>

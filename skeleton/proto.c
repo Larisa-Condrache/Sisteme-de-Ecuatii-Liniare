@@ -282,6 +282,7 @@ int writeSolveResponse(int sock, msgHeaderType h,
     rh.hdr.opID     = htonl(OPR_SOLVE);
     rh.hdr.msgSize  = htonl((uint32_t)sizeof(rh));
     rh.status       = htonl((uint32_t)status);
+    rh.n            = htonl((uint32_t)n);
 
     nb = send(sock, &rh, sizeof(rh), 0);
     if (nb <= 0) return -1;
@@ -307,6 +308,7 @@ int readSolveResponse(int sock, int *status, int *n, double **x)
     if (nb <= 0) return -1;
 
     *status = (int)ntohl((uint32_t)rh.status);
+    *n      = (int)ntohl((uint32_t)rh.n);
 
     if (*status != 0 || *n <= 0) {
         *x = NULL;
