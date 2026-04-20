@@ -92,6 +92,8 @@ inetclient: inetsample2.c proto.o
 solve_client: solve_client.c proto.o
 	$(CC) $(CFLAGS) solve_client.c proto.o -lm -o solve_client
 
+equation_client: equation_type1_client.c proto.o
+	$(CC) $(CFLAGS) equation_client.c proto.o -o equation_type1_client
 # -----------------------------------------------------------------------
 # Curatenie
 # -----------------------------------------------------------------------
