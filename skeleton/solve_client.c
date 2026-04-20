@@ -6,7 +6,7 @@
  * can be verified by eye.
  *
  * Usage:
- *   ./solve_client [-h host] [-p port] [-n size] [-w workers]
+ *   ./solve_client [-h host] [-p port] [-n size]
  *
  * Build:
  *   gcc solve_client.c proto.c -o solve_client -Wall -Wextra

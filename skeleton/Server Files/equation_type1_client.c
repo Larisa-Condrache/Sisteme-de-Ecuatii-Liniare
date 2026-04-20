@@ -1,12 +1,27 @@
 /*
- * equation_client.c — Client pentru rezolvarea ecuațiilor de tip ax + b = c
- * Traduce ecuația în format Ax = b și o trimite la serverul PCD.
+ * equation_type1_client.c — Client pentru ecuații de ordin 1, 2 sau 3.
+ *
+ * Ordin 1 (1 ecuație, 1 necunoscută x):
+ *   ./equation_type1_client -n 1 "2x+4=6"
+ *   Formate: ax+b=c  |  ax-b=c  |  ax=c  |  x+b=c  |  x-b=c  |  x=c
+ *
+ * Ordin 2 (2 ecuații, 2 necunoscute x, y):
+ *   ./equation_type1_client -n 2 "2x+3y=7" "x+2y=4"
+ *   Format: ax+by=c  |  ax-by=c  (coeficienții pot fi negativi)
+ *
+ * Ordin 3 (3 ecuații, 3 necunoscute x, y, z):
+ *   ./equation_type1_client -n 3 "x+y+z=6" "2x-y+z=3" "x+2y-z=2"
+ *   Format: ax+by+cz=d  (toate combinațiile de semne între termeni)
+ *
+ * Build:
+ *   gcc equation_type1_client.c proto.c -o equation_type1_client -Wall -Wextra
  */
 
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
+#include <getopt.h>
 #include <sys/types.h>
 #include <sys/socket.h>
 #include <netinet/in.h>
@@ -14,80 +29,210 @@
 
 #include "proto.h"
 
-void parse_equation(const char *str, double *a, double *b, double *c) {
-    // Încercăm să citim formatul "ax+b=c"
-    // Exemplu: "2x+4=6" -> a=2, b=4, c=6
-    if (sscanf(str, "%lfx+%lf=%lf", a, b, c) == 3) return;
+#define DEFAULT_HOST "127.0.0.1"
+#define DEFAULT_PORT 18081
 
-    // Încercăm formatul "x+b=c" (unde a este implicit 1)
-    if (sscanf(str, "x+%lf=%lf", b, c) == 2) {
-        *a = 1.0;
-        return;
-    }
+static const char *var_name[] = { "x", "y", "z" };
 
-    fprintf(stderr, "Format invalid! Foloseste: ax+b=c (ex: 2x+4=6)\n");
+/* ------------------------------------------------------------------ */
+/*  Parsere per ordin                                                  */
+/* ------------------------------------------------------------------ */
+
+/* Ordin 1: ax + b = c  →  row[0]*x = rhs */
+static void parse_eq1(const char *str, double row[1], double *rhs)
+{
+    double a, b, c;
+
+    if (sscanf(str, "%lfx+%lf=%lf", &a, &b, &c) == 3) { row[0] = a; *rhs = c - b; return; }
+    if (sscanf(str, "%lfx-%lf=%lf", &a, &b, &c) == 3) { row[0] = a; *rhs = c + b; return; }
+    if (sscanf(str, "%lfx=%lf",     &a, &c)     == 2) { row[0] = a; *rhs = c;     return; }
+    if (sscanf(str, "x+%lf=%lf",   &b, &c)     == 2) { row[0] = 1.0; *rhs = c - b; return; }
+    if (sscanf(str, "x-%lf=%lf",   &b, &c)     == 2) { row[0] = 1.0; *rhs = c + b; return; }
+    if (sscanf(str, "x=%lf",       &c)          == 1) { row[0] = 1.0; *rhs = c;     return; }
+
+    fprintf(stderr,
+        "Format invalid pentru ecuatie de ordin 1: \"%s\"\n"
+        "Formate acceptate: ax+b=c | ax-b=c | ax=c | x+b=c | x-b=c | x=c\n", str);
     exit(EXIT_FAILURE);
 }
 
-int main(int argc, char *argv[]) {
-    if (argc < 2) {
-        printf("Utilizare: %s \"ecuatie\"\nExemplu: %s \"2x+4=6\"\n", argv[0], argv[0]);
-        return 1;
+/* Ordin 2: ax + by = c  →  row[0]*x + row[1]*y = rhs */
+static void parse_eq2(const char *str, double row[2], double *rhs)
+{
+    double a, b, c;
+
+    if (sscanf(str, "%lfx+%lfy=%lf", &a, &b, &c) == 3) { row[0] = a;    row[1] =  b; *rhs = c; return; }
+    if (sscanf(str, "%lfx-%lfy=%lf", &a, &b, &c) == 3) { row[0] = a;    row[1] = -b; *rhs = c; return; }
+    if (sscanf(str,  "x+%lfy=%lf",      &b, &c) == 2) { row[0] = 1.0;  row[1] =  b; *rhs = c; return; }
+    if (sscanf(str,  "x-%lfy=%lf",      &b, &c) == 2) { row[0] = 1.0;  row[1] = -b; *rhs = c; return; }
+    if (sscanf(str, "-x+%lfy=%lf",      &b, &c) == 2) { row[0] = -1.0; row[1] =  b; *rhs = c; return; }
+    if (sscanf(str, "-x-%lfy=%lf",      &b, &c) == 2) { row[0] = -1.0; row[1] = -b; *rhs = c; return; }
+
+    fprintf(stderr,
+        "Format invalid pentru ecuatie de ordin 2: \"%s\"\n"
+        "Formate acceptate: ax+by=c | ax-by=c | x+by=c | x-by=c\n"
+        "  (coeficient negativ la x: ex. -2x+3y=5 sau -x+3y=5)\n", str);
+    exit(EXIT_FAILURE);
+}
+
+/* Ordin 3: ax + by + cz = d  →  row[0]*x + row[1]*y + row[2]*z = rhs
+ * Suporta coeficienti impliciti (1/-1) pentru oricare dintre x, y, z    */
+static void parse_eq3(const char *str, double row[3], double *rhs)
+{
+    double a, b, c, d;
+
+    /* coeficient explicit la x */
+    if (sscanf(str, "%lfx+%lfy+%lfz=%lf", &a, &b, &c, &d) == 4) { row[0]=a;    row[1]= b;    row[2]= c;    *rhs=d; return; }
+    if (sscanf(str, "%lfx+%lfy-%lfz=%lf", &a, &b, &c, &d) == 4) { row[0]=a;    row[1]= b;    row[2]=-c;    *rhs=d; return; }
+    if (sscanf(str, "%lfx-%lfy+%lfz=%lf", &a, &b, &c, &d) == 4) { row[0]=a;    row[1]=-b;    row[2]= c;    *rhs=d; return; }
+    if (sscanf(str, "%lfx-%lfy-%lfz=%lf", &a, &b, &c, &d) == 4) { row[0]=a;    row[1]=-b;    row[2]=-c;    *rhs=d; return; }
+    /* coeficient implicit la x (1) */
+    if (sscanf(str,  "x+%lfy+%lfz=%lf",      &b, &c, &d) == 3) { row[0]=1.0;  row[1]= b;    row[2]= c;    *rhs=d; return; }
+    if (sscanf(str,  "x+%lfy-%lfz=%lf",      &b, &c, &d) == 3) { row[0]=1.0;  row[1]= b;    row[2]=-c;    *rhs=d; return; }
+    if (sscanf(str,  "x-%lfy+%lfz=%lf",      &b, &c, &d) == 3) { row[0]=1.0;  row[1]=-b;    row[2]= c;    *rhs=d; return; }
+    if (sscanf(str,  "x-%lfy-%lfz=%lf",      &b, &c, &d) == 3) { row[0]=1.0;  row[1]=-b;    row[2]=-c;    *rhs=d; return; }
+    /* coeficient implicit la x (-1) */
+    if (sscanf(str, "-x+%lfy+%lfz=%lf",      &b, &c, &d) == 3) { row[0]=-1.0; row[1]= b;    row[2]= c;    *rhs=d; return; }
+    if (sscanf(str, "-x+%lfy-%lfz=%lf",      &b, &c, &d) == 3) { row[0]=-1.0; row[1]= b;    row[2]=-c;    *rhs=d; return; }
+    if (sscanf(str, "-x-%lfy+%lfz=%lf",      &b, &c, &d) == 3) { row[0]=-1.0; row[1]=-b;    row[2]= c;    *rhs=d; return; }
+    if (sscanf(str, "-x-%lfy-%lfz=%lf",      &b, &c, &d) == 3) { row[0]=-1.0; row[1]=-b;    row[2]=-c;    *rhs=d; return; }
+
+    fprintf(stderr,
+        "Format invalid pentru ecuatie de ordin 3: \"%s\"\n"
+        "Format acceptat: ax+by+cz=d (toate combinatiile de semne intre termeni)\n"
+        "  coeficientii 1/-1 pot fi omisi: ex. x+2y-z=5, -x+y+3z=2\n", str);
+    exit(EXIT_FAILURE);
+}
+
+/* ------------------------------------------------------------------ */
+
+static void print_usage(const char *prog)
+{
+    fprintf(stderr,
+        "Utilizare: %s -n <1|2|3> [-h host] [-p port] \"ec1\" [\"ec2\" \"ec3\"]\n\n"
+        "  Ordin 1:  %s -n 1 \"2x+4=6\"\n"
+        "  Ordin 2:  %s -n 2 \"2x+3y=7\" \"x+2y=4\"\n"
+        "  Ordin 3:  %s -n 3 \"x+y+z=6\" \"2x-y+z=3\" \"x+2y-z=2\"\n",
+        prog, prog, prog, prog);
+}
+
+/* ------------------------------------------------------------------ */
+
+int main(int argc, char *argv[])
+{
+    const char *host = DEFAULT_HOST;
+    int         port = DEFAULT_PORT;
+    int         n    = 0;
+
+    int c;
+    while ((c = getopt(argc, argv, "n:h:p:")) != -1) {
+        switch (c) {
+        case 'n': n    = atoi(optarg); break;
+        case 'h': host = optarg;       break;
+        case 'p': port = atoi(optarg); break;
+        default:  print_usage(argv[0]); return EXIT_FAILURE;
+        }
     }
 
-    double a, b, c;
-    parse_equation(argv[1], &a, &b, &c);
+    if (n < 1 || n > 3) {
+        fprintf(stderr, "Eroare: -n trebuie sa fie 1, 2 sau 3.\n");
+        print_usage(argv[0]);
+        return EXIT_FAILURE;
+    }
 
-    // Transformăm ax + b = c  în  Ax = B
-    // n = 1
-    // Matricea A = [a]
-    // Vectorul B = [c - b]
-    int n = 1;
-    double A_mat[1] = { a };
-    double B_vec[1] = { c - b };
+    if (argc - optind < n) {
+        fprintf(stderr, "Eroare: sunt necesare exact %d ecuatie(i) ca argumente.\n", n);
+        print_usage(argv[0]);
+        return EXIT_FAILURE;
+    }
 
-    printf("[client] Rezolvam: %.2fx + %.2f = %.2f\n", a, b, c);
-    printf("[client] Traducere: %.2fx = %.2f\n", a, c - b);
+    /* ---- Construire matrice A si vector b ---- */
+    double *A_mat = (double *)calloc((size_t)(n * n), sizeof(double));
+    double *B_vec = (double *)calloc((size_t)n,       sizeof(double));
+    if (!A_mat || !B_vec) {
+        fprintf(stderr, "malloc failed\n");
+        return EXIT_FAILURE;
+    }
 
-    // ---- Conectare la server ----
+    printf("[client] Sistem de ordin %d:\n", n);
+    for (int i = 0; i < n; i++) {
+        double row[3] = {0.0, 0.0, 0.0};
+        double rhs    = 0.0;
+
+        switch (n) {
+        case 1: parse_eq1(argv[optind + i], row, &rhs); break;
+        case 2: parse_eq2(argv[optind + i], row, &rhs); break;
+        case 3: parse_eq3(argv[optind + i], row, &rhs); break;
+        }
+
+        for (int j = 0; j < n; j++)
+            A_mat[i * n + j] = row[j];
+        B_vec[i] = rhs;
+
+        printf("  Ec %d: ", i + 1);
+        for (int j = 0; j < n; j++) {
+            if (j == 0) printf("%.4g%s",   row[j], var_name[j]);
+            else        printf(" %+.4g%s", row[j], var_name[j]);
+        }
+        printf(" = %.4g\n", rhs);
+    }
+
+    /* ---- Conectare la server ---- */
     int sock = socket(PF_INET, SOCK_STREAM, 0);
+    if (sock < 0) { perror("socket"); return EXIT_FAILURE; }
+
+    struct hostent *hostinfo = gethostbyname(host);
+    if (!hostinfo) {
+        fprintf(stderr, "Host necunoscut: %s\n", host);
+        close(sock); return EXIT_FAILURE;
+    }
+
     struct sockaddr_in srv;
-    struct hostent *hostinfo = gethostbyname("127.0.0.1");
     srv.sin_family = AF_INET;
-    srv.sin_port = htons(18081);
-    srv.sin_addr = *(struct in_addr *)hostinfo->h_addr_list[0];
+    srv.sin_port   = htons((uint16_t)port);
+    srv.sin_addr   = *(struct in_addr *)hostinfo->h_addr_list[0];
 
     if (connect(sock, (struct sockaddr *)&srv, sizeof(srv)) < 0) {
         perror("connect");
-        return 1;
+        close(sock); return EXIT_FAILURE;
     }
+    printf("[client] Conectat la %s:%d\n", host, port);
 
-    // ---- Protocol Handshake ----
+    /* ---- Handshake ---- */
     msgHeaderType h;
-    msgIntType m;
+    msgIntType    mi;
     h.clientID = 0; h.opID = OPR_CONNECT;
     writeSingleInt(sock, h, 0);
-    readSingleInt(sock, &m);
-    h.clientID = m.msg;
+    readSingleInt(sock, &mi);
+    h.clientID = mi.msg;
 
-    // ---- Trimitere OPR_SOLVE ----
+    /* ---- OPR_SOLVE ---- */
     h.opID = OPR_SOLVE;
     if (writeSolveRequest(sock, h, n, A_mat, B_vec) < 0) {
-        printf("Eroare la trimitere!\n");
-        return 1;
+        fprintf(stderr, "Eroare la trimitere!\n");
+        close(sock); return EXIT_FAILURE;
     }
 
-    // ---- Primire Rezultat ----
-    int status, n_out;
+    int     status = 0, n_out = 0;
     double *x_result = NULL;
     if (readSolveResponse(sock, &status, &n_out, &x_result) < 0 || status != 0) {
-        printf("Serverul a raportat eroare!\n");
-        return 1;
+        fprintf(stderr, "Serverul a raportat eroare (status=%d)!\n", status);
+        close(sock); return EXIT_FAILURE;
     }
 
-    printf("\n[REZULTAT] x = %.4f\n", x_result[0]);
+    /* ---- Afisare rezultat ---- */
+    printf("\n[REZULTAT]\n");
+    for (int i = 0; i < n_out; i++)
+        printf("  %s = %.6f\n", var_name[i], x_result[i]);
 
     free(x_result);
+    free(A_mat);
+    free(B_vec);
+
+    /* ---- BYE ---- */
+    h.opID = OPR_BYE;
+    writeSingleInt(sock, h, 0);
     close(sock);
-    return 0;
+
+    return EXIT_SUCCESS;
 }
