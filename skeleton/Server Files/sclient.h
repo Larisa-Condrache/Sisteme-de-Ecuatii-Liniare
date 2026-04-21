@@ -1,3 +1,7 @@
+//gsoap ns service name: SampleServices
+//gsoap ns service style: document
+//gsoap ns service encoding: literal
+//gsoap ns schema namespace: http://tempuri.org/ns.xsd
 
 typedef struct concatStruct {
   long id 1;

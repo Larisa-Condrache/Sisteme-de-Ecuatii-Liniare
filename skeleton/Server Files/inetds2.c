@@ -76,10 +76,19 @@ static int inet_socket(uint16_t port, int reuse)
 
 
 /*
-create_client_id() genereaza un id si foloseste timestamp-ul Unix
-Punct de intrare pentru thread-ul INET*/
+ * create_client_id() — genereaza un ID unic de client.
+ * Combina timestamp-ul Unix cu un contor atomic pentru a garanta
+ * unicitatea chiar si la conexiuni simultane rapide.
+ */
+int create_client_id(void)
+{
+    static volatile int counter = 0;
+    int cnt = __atomic_add_fetch(&counter, 1, __ATOMIC_SEQ_CST);
+    int ts  = (int)(time(NULL) & 0xFFFF);   /* ultimii 16 biti din timestamp */
+    return (ts << 12) ^ (cnt & 0xFFF);      /* combina: niciodata 0           */
+}
 
-
+/* Punct de intrare pentru thread-ul INET */
 void *inet_main(void *args)
 {
     int              port = *((int *)args);
