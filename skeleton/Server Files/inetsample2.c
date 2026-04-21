@@ -1,4 +1,19 @@
 /*
+  Verificare build si analiza statica:
+    • -Wall si -Wextra semnaleaza probleme generale precum variabile
+      nefolosite, formate gresite sau apeluri suspecte.
+    • -Wpedantic forteaza respectarea mai stricta a standardului C.
+    • -Wshadow avertizeaza daca o variabila locala ascunde alta variabila,
+      situatie care poate produce bug-uri greu de observat.
+    • -Wconversion avertizeaza la conversii implicite care pot pierde
+      informatie sau pot schimba semnul unei valori.
+    • -Wformat=2 verifica mai strict folosirea functiilor din familia printf.
+    • -Wnull-dereference semnaleaza dereferentieri potential invalide.
+    • Fisierul este inclus si in tinta „make tidy”, unde clang-tidy face
+      o analiza statica suplimentara pentru stil, siguranta si bune practici.
+ */
+
+/*
 inetsample2.c — Client de test pentru server.
 Modificari fata de skeleton: host-ul si portul serverului sunt acum configurabile din CLI cu getopt) si adaugat cazul de test OPR_CONC am adaugat inchidere cu close() inainte de exit.
 ex utilizare:

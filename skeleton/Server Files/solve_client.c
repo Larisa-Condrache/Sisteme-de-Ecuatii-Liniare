@@ -1,3 +1,18 @@
+/*
+  Verificare build si analiza statica:
+    • -Wall si -Wextra semnaleaza probleme generale precum variabile
+      nefolosite, formate gresite sau apeluri suspecte.
+    • -Wpedantic forteaza respectarea mai stricta a standardului C.
+    • -Wshadow avertizeaza daca o variabila locala ascunde alta variabila,
+      situatie care poate produce bug-uri greu de observat.
+    • -Wconversion avertizeaza la conversii implicite care pot pierde
+      informatie sau pot schimba semnul unei valori.
+    • -Wformat=2 verifica mai strict folosirea functiilor din familia printf.
+    • -Wnull-dereference semnaleaza dereferentieri potential invalide.
+    • Fisierul este inclus si in tinta „make tidy”, unde clang-tidy face
+      o analiza statica suplimentara pentru stil, siguranta si bune practici.
+ */
+
 /* Trimite un sistem liniar Ax=b catre server si afiseaza solutia, apoi sistemul folosit implicit are o solutie analitica, astfel incat rezultatele pot fi verificate vizual.
  Utilizare:   ./solve_client [-h host] [-p port] [-n size] 
  Compilare:   gcc solve_client.c proto.c -o solve_client -Wall -Wextra 
