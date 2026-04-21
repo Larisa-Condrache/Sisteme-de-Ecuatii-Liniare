@@ -1,0 +1,473 @@
+openapi: "3.0.3"
+
+info:
+  title: Linear Equations Server API
+  version: "1.0.0"
+  description: |
+    Serverul expune doua interfete paralele:
+
+    1. **SOAP** (HTTP, port `soap_port` din server.cfg) — operatii documentate
+       mai jos ca pseudo-REST pentru lizibilitate; clientii reali trimit
+       envelope-uri SOAP/XML generate de gSOAP.
+
+    2. **Protocol binar TCP** (port `inet_port` din server.cfg) — fiecare
+       mesaj incepe cu un `msgHeaderType` (12 octeti: msgSize, clientID,
+       opID, toate in network byte order) urmat de payload-ul specific
+       operatiei.  Descrierea acestui protocol se afla in sectiunea
+       `x-binary-protocol` de la sfarsitul fisierului.
+
+servers:
+  - url: "http://127.0.0.1:{soapPort}"
+    description: Interfata SOAP (gSOAP)
+    variables:
+      soapPort:
+        default: "8080"
+        description: Valoarea `soap_port` din server.cfg
+
+tags:
+  - name: session
+    description: Gestionarea sesiunii (connect / bye)
+  - name: string
+    description: Operatii pe siruri de caractere
+  - name: numeric
+    description: Operatii numerice
+  - name: solver
+    description: Rezolvare sistem liniar Ax=b (doar protocol binar)
+
+# ---------------------------------------------------------------------------
+# Paths — interfata SOAP expusa ca resurse REST pentru documentare
+# ---------------------------------------------------------------------------
+paths:
+  /connect:
+    post:
+      tags: [session]
+      summary: Obtine un ID unic de client
+      description: |
+        Clientul trimite o cerere fara corp; serverul returneaza un `clientID`
+        intreg generat din timestamp si un contor atomic.  Toate mesajele
+        ulterioare trebuie sa includa acest ID in header.
+
+        **SOAP action:** `ns__connect`
+        **Opcode binar:** `OPR_CONNECT = 0`
+      requestBody:
+        required: false
+        content:
+          application/json:
+            schema:
+              type: object
+              description: Corp gol — nu sunt necesari parametri.
+      responses:
+        "200":
+          description: ID de client alocat cu succes
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ConnectResponse"
+        "500":
+          $ref: "#/components/responses/ServerError"
+
+  /echo:
+    post:
+      tags: [string]
+      summary: Ecou al unui sir de caractere
+      description: |
+        Serverul returneaza sirul primit neschimbat.
+
+        **SOAP action:** `ns__echo`
+        **Opcode binar:** `OPR_ECHO = 1`
+        **Payload binar:** `singleStringMsg` — lungimea sirului ca `SingleInt`,
+        urmat de octetii sirului.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/EchoRequest"
+      responses:
+        "200":
+          description: Sirul ecou
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StringResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/ServerError"
+
+  /concat:
+    post:
+      tags: [string]
+      summary: Concateneaza doua siruri de caractere
+      description: |
+        Serverul returneaza `op2 + " " + op1` (ordinea este inversata intentionat
+        conform implementarii `do_client_concat` din `soapds.c`).
+
+        **SOAP action:** `ns__concat`  — parametri: `id`, `op1`, `op2`
+        **Opcode binar:** `OPR_CONC = 2`
+        **Payload binar:** doua `singleStringMsg` consecutive.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ConcatRequest"
+      responses:
+        "200":
+          description: Sirul concatenat (`op2 op1`)
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/StringResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/ServerError"
+
+  /adder:
+    post:
+      tags: [numeric]
+      summary: Aduna doua numere intregi
+      description: |
+        **SOAP action:** `ns__adder`  — parametri: `id`, `op1`, `op2`
+        **Opcode binar:** `OPR_ADD = 4`
+        **Payload binar:** `multiIntMsg` (header 12 B + doua int-uri de 4 B).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/AdderRequest"
+      responses:
+        "200":
+          description: Suma celor doua numere
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LongResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/ServerError"
+
+  /negate:
+    post:
+      tags: [numeric]
+      summary: Returneaza opusul unui numar intreg (doar protocol binar)
+      description: |
+        Operatia nu este expusa prin SOAP; exista doar in protocolul binar.
+
+        **Opcode binar:** `OPR_NEG = 3`
+        **Payload binar:** `singleIntMsg` (header 12 B + un int de 4 B).
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/NegateRequest"
+      responses:
+        "200":
+          description: Opusul numarului furnizat
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/LongResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+
+  /solve:
+    post:
+      tags: [solver]
+      summary: Rezolva sistemul liniar Ax = b
+      description: |
+        Disponibila **exclusiv** prin protocolul binar TCP (`OPR_SOLVE = 6`).
+
+        Serverul alege automat calea de calcul:
+        - **Seriala** (`LAPACKE_dgesv`) daca `n < solver_threshold` (implicit 32)
+          sau `solver_workers == 1`.
+        - **Paralela** (eliminare Gaussiana cu procese copil via `fork` + pipes)
+          altfel; numarul de workeri este limitat la `SOLVER_MAX_WORKERS = 16`.
+
+        **Format mesaj binar (cerere):**
+        ```
+        [solveRequestHeaderType: 16 B]
+          hdr.msgSize  = sizeof(solveRequestHeaderType)  — network byte order
+          hdr.clientID                                   — network byte order
+          hdr.opID     = OPR_SOLVE (6)                   — network byte order
+          n                                              — network byte order
+        [A: n*n double-uri, IEEE 754, ordinea octetilor nativa]
+        [b: n   double-uri, IEEE 754, ordinea octetilor nativa]
+        ```
+
+        **Format mesaj binar (raspuns):**
+        ```
+        [solveResponseHeaderType: 20 B]
+          hdr.msgSize  = sizeof(solveResponseHeaderType) — network byte order
+          hdr.clientID                                   — network byte order
+          hdr.opID     = OPR_SOLVE (6)                   — network byte order
+          status       — network byte order (0=ok, -1=singular, -2=alocare, -3=IPC)
+          n            — network byte order
+        [x: n double-uri, IEEE 754, ordinea octetilor nativa]  — doar daca status==0
+        ```
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/SolveRequest"
+      responses:
+        "200":
+          description: Solutia x sau eroare de rezolvare
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/SolveResponse"
+        "400":
+          $ref: "#/components/responses/BadRequest"
+        "500":
+          $ref: "#/components/responses/ServerError"
+
+  /bye:
+    post:
+      tags: [session]
+      summary: Inchide sesiunea curenta
+      description: |
+        Serverul inchide socket-ul dupa primirea acestei operatii.
+        Nu exista corp de raspuns.
+
+        **SOAP action:** `ns__bye`  — parametru: `id`
+        **Opcode binar:** `OPR_BYE = 5`
+        **Payload binar:** `singleIntMsg` cu `id`-ul clientului.
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ByeRequest"
+      responses:
+        "204":
+          description: Sesiune inchisa — fara corp de raspuns
+        "500":
+          $ref: "#/components/responses/ServerError"
+
+# ---------------------------------------------------------------------------
+# Components
+# ---------------------------------------------------------------------------
+components:
+  schemas:
+    # --- cereri ---
+
+    EchoRequest:
+      type: object
+      required: [clientId, message]
+      properties:
+        clientId:
+          type: integer
+          format: int32
+          description: ID obtinut de la /connect
+        message:
+          type: string
+          description: Sirul de ecou
+
+    ConcatRequest:
+      type: object
+      required: [clientId, op1, op2]
+      properties:
+        clientId:
+          type: integer
+          format: int32
+        op1:
+          type: string
+          description: Primul operand (apare al doilea in rezultat)
+        op2:
+          type: string
+          description: Al doilea operand (apare primul in rezultat)
+
+    AdderRequest:
+      type: object
+      required: [clientId, op1, op2]
+      properties:
+        clientId:
+          type: integer
+          format: int32
+        op1:
+          type: integer
+          format: int64
+        op2:
+          type: integer
+          format: int64
+
+    NegateRequest:
+      type: object
+      required: [clientId, value]
+      properties:
+        clientId:
+          type: integer
+          format: int32
+        value:
+          type: integer
+          format: int32
+          description: Numarul de negat
+
+    SolveRequest:
+      type: object
+      required: [clientId, n, A, b]
+      properties:
+        clientId:
+          type: integer
+          format: int32
+        n:
+          type: integer
+          format: int32
+          minimum: 1
+          maximum: 4096
+          description: Ordinul sistemului
+        A:
+          type: array
+          description: Matricea coeficientilor, dispusa pe linii (row-major), n*n elemente
+          items:
+            type: number
+            format: double
+        b:
+          type: array
+          description: Vectorul termenilor liberi, n elemente
+          items:
+            type: number
+            format: double
+
+    ByeRequest:
+      type: object
+      required: [clientId]
+      properties:
+        clientId:
+          type: integer
+          format: int32
+
+    # --- raspunsuri ---
+
+    ConnectResponse:
+      type: object
+      properties:
+        clientId:
+          type: integer
+          format: int32
+          description: ID unic alocat de server
+
+    StringResponse:
+      type: object
+      properties:
+        result:
+          type: string
+
+    LongResponse:
+      type: object
+      properties:
+        result:
+          type: integer
+          format: int64
+
+    SolveResponse:
+      type: object
+      properties:
+        status:
+          type: integer
+          format: int32
+          enum: [0, -1, -2, -3]
+          description: |
+            0   = solutie gasita
+            -1  = matrice singulara
+            -2  = eroare de alocare memorie
+            -3  = eroare IPC (pipe/fork)
+        n:
+          type: integer
+          format: int32
+          description: Ordinul sistemului (reflectat din cerere)
+        x:
+          type: array
+          description: Vectorul solutie — prezent doar cand status=0
+          items:
+            type: number
+            format: double
+
+    ErrorResponse:
+      type: object
+      properties:
+        error:
+          type: string
+          description: Descrierea erorii
+
+  responses:
+    BadRequest:
+      description: Parametri invalizi
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+    ServerError:
+      description: Eroare interna de server
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/ErrorResponse"
+
+# ---------------------------------------------------------------------------
+# Documentatie suplimentara pentru protocolul binar TCP
+# ---------------------------------------------------------------------------
+x-binary-protocol:
+  description: >
+    Protocolul binar TCP ruleaza pe `inet_port` (implicit 8888, configurabil
+    in server.cfg).  Fiecare sesiune incepe cu OPR_CONNECT (clientID=0),
+    iar serverul raspunde cu ID-ul alocat.  Toate campurile intregi sunt in
+    network byte order (big-endian); valorile double sunt in ordinea nativa
+    a masinii (little-endian pe x86).
+
+  header:
+    description: "msgHeaderType — 12 octeti"
+    fields:
+      msgSize:
+        offset: 0
+        size: 4
+        type: int32 (network byte order)
+        description: Dimensiunea totala a mesajului in octeti
+      clientID:
+        offset: 4
+        size: 4
+        type: int32 (network byte order)
+        description: 0 la connect, altfel ID-ul obtinut
+      opID:
+        offset: 8
+        size: 4
+        type: int32 (network byte order)
+        description: Codul operatiei (vezi opcodes)
+
+  opcodes:
+    OPR_CONNECT: 0
+    OPR_ECHO: 1
+    OPR_CONC: 2
+    OPR_NEG: 3
+    OPR_ADD: 4
+    OPR_BYE: 5
+    OPR_SOLVE: 6
+
+  message_formats:
+    connect:
+      request: "header (12 B) — fara payload"
+      response: "header (12 B) + int32 clientID"
+    echo:
+      request: "header (12 B) + int32 strLen + strLen octeti"
+      response: "header (12 B) + int32 strLen + strLen octeti"
+    concat:
+      request: "header (12 B) + SingleString(op1) + SingleString(op2)"
+      response: "header (12 B) + int32 strLen + strLen octeti"
+    negate:
+      request: "header (12 B) + int32 value"
+      response: "header (12 B) + int32 result"
+    adder:
+      request: "header (12 B) + int32 op1 + int32 op2"
+      response: "header (12 B) + int32 result"
+    bye:
+      request: "header (12 B) + int32 clientID"
+      response: "(fara raspuns — serverul inchide socket-ul)"
+    solve:
+      request: "solveRequestHeaderType (16 B) + n*n double + n double"
+      response: "solveResponseHeaderType (20 B) + n double (doar daca status=0)"
