@@ -1,51 +1,60 @@
-# PCD 22-23 IA3 — Milestone 1 + T26 Linear System Solver
+# T26 Linear System Solver
 
-Server multi-threaded în C cu trei canale de comunicație (UNIX / INET / SOAP), integrat cu **libconfig** pentru configurare la runtime, **getopt** pentru argumente CLI, și **LAPACKE** (OpenBLAS) pentru rezolvarea paralelă a sistemelor de ecuații liniare (T26).
+Server multi-threaded în C cu trei canale de comunicație concurente (UNIX / INET / SOAP), integrat cu **libconfig** pentru configurare dinamică la runtime, **getopt** pentru argumente CLI, și un motor de calcul paralel hibrid pentru rezolvarea sistemelor de ecuații liniare (T26).
 
 ---
 
 ## Cuprins
 
-1. [Structura proiectului](#structura-proiectului)
-2. [Dependențe](#dependențe)
-3. [Compilare](#compilare)
-4. [Configurare](#configurare)
-5. [Rulare](#rulare)
-6. [Arhitectura serverului](#arhitectura-serverului)
+1. [Capabilități principale (Ce face proiectul)](#capabilități-principale-ce-face-proiectul)
+2. [Structura proiectului](#structura-proiectului)
+3. [Dependențe](#dependențe)
+4. [Compilare](#compilare)
+5. [Configurare](#configurare)
+6. [Rulare și Exemple de Utilizare](#rulare-și-exemple-de-utilizare)
 7. [Protocolul binar INET](#protocolul-binar-inet)
-8. [T26 — Solver sisteme liniare](#t26--solver-sisteme-liniare)
-9. [Demo Milestone 1](#demo-milestone-1)
-10. [Modificări față de skeleton](#modificări-față-de-skeleton)
+8. [T26 — Solver sisteme liniare (Arhitectura Matematică)](#t26--solver-sisteme-liniare-arhitectura-matematică)
 
 ---
 
-## Structura proiectului
+## 1. Capabilități principale (Ce face proiectul)
 
-```
+Aplicația este un ecosistem client-server robust, capabil să proceseze cereri matematice și operațiuni generale de rețea. Funcționalitățile sale cheie sunt:
+
+*   **Parsare Algebrică Umană:** Clientul dedicat (`equation_type1_client`) permite utilizatorului să introducă ecuații naturale din terminal, de tipul `"2x+3y=7"`, `"x-y=-1"`. Clientul extrage automat matricea $A$ și vectorul $b$.
+*   **Solver Liniar Paralel Propriu:** Pentru sisteme mari, serverul nu deleagă pur și simplu munca. Implementează un **algoritm custom de Eliminare Gaussiană Paralelă** cu comunicare IPC (pipe-uri bidirecționale). Procesul părinte instanțiază Workeri (`fork`), le împarte benzile de calcul și le sincronizează asincron.
+*   **Fallback Serial Optimizat:** Pentru sisteme mici ($n < 32$), serverul ocolește intenționat overhead-ul de `fork()` și apelează direct funcția ultra-optimizată `LAPACKE_dgesv` (OpenBLAS).
+*   **Server Multi-Protocol:**
+    *   **INET:** Multiplexează prin `select()` zeci de clienți simultan pe TCP (port implicit 18081).
+    *   **UNIX:** Ocolește stiva de rețea pentru performanță maximă pe aceeași mașină (`/tmp/unixds`).
+    *   **SOAP:** Oferă o interfață Enterprise Web Service pentru clienți scriși în alte limbaje (ex. Java, C#).
+*   **Configurare ierarhică:** Serverul își preia setările combinând argumente CLI (`--port`), Variabile de Mediu (`PCD_CONFIG`) și fișiere `.cfg` (`libconfig`).
+
+---
+
+## 2. Structura proiectului
+
+```text
 skeleton/
-├── server.cfg        # Fișier de configurare libconfig
-├── config.h          # Structura server_config_t și API-ul de configurare
-├── config.c          # Implementare libconfig: config_load(), config_apply_args()
-├── threeds.c         # main(): CLI (getopt), env vars, fork() demo, pornire threaduri
-├── inetds2.c         # Thread server INET/TCP (select-based multiplexer)
-├── unixds.c          # Thread server UNIX domain socket
-├── soapds.c          # Thread server SOAP (via gsoap)
-├── proto.h           # Definiții protocol binar + structuri OPR_SOLVE
-├── proto.c           # Helpere read/write pentru toate tipurile de mesaje
-├── solver.h          # API solver: solver_solve(n, A, b, num_workers)
-├── solver.c          # Implementare: serial (LAPACKE_dgesv) + parallel (fork+pipe)
-├── inetsample2.c     # Client de test general INET cu getopt
-├── solve_client.c    # Client de test dedicat T26 (OPR_SOLVE)
-├── sclient.h         # Definiții servicii gsoap (input pentru soapcpp2)
-└── makefile
-
-soap-sample/          # Exemplu complet furnizat de profesor (nemodificat)
-└── SOAP_CLIENT/      # Client HTML/JS pentru testare SOAP din browser
+├── server.cfg               # Fișier de configurare libconfig
+├── config.h / .c            # Implementare încărcare și merge configurări
+├── threeds.c                # Entry-point server: parsează CLI, execută demo fork(), pornește firele
+├── inetds2.c                # Thread server INET/TCP (select-based multiplexer)
+├── unixds.c                 # Thread server UNIX Domain Sockets
+├── soapds.c                 # Thread server SOAP (via gsoap)
+├── proto.h / .c             # Definiții protocol binar INET + funcții serializare (read/write)
+├── solver.h / .c            # Implementare T26: Eliminare Gaussiană Paralelă + serial LAPACKE
+├── inetsample2.c            # Client generic INET (testează ECHO, CONC, ADD, NEG)
+├── equation_type1_client.c  # Client avansat: parsează ecuații string și cere serverului OPR_SOLVE
+├── sclient.h                # Definiții servicii gsoap (input pentru soapcpp2)
+└── Makefile
 ```
 
 ---
 
-## Dependențe
+## 3. Dependențe
+
+Pentru a compila proiectul, sistemul are nevoie de librăriile gSOAP, libconfig și mediul matematic LAPACKE/OpenBLAS.
 
 ```bash
 sudo apt-get update
@@ -56,40 +65,28 @@ sudo apt-get install -y \
     libopenblas-dev
 ```
 
-Sau direct prin target-ul din makefile:
-
-```bash
-make deps
-```
-
 ---
 
-## Compilare
+## 4. Compilare
 
 ```bash
-# Server + ambii clienți de test
+# Compilează tot: generare SOAP, Server, Client Ecuații, Client INET
 make all
 
-# Doar serverul
+# Compilare specifică
 make serverds
-
-# Doar clientul INET general
+make equation_type1_client
 make inetclient
 
-# Doar clientul T26
-make solve_client
-
-# Curățare artefacte de build
+# Curățare artefacte de build (și fișiere generate de gSOAP)
 make clean
 ```
 
-> **Notă:** Prima compilare generează automat fișierele gsoap (`soapC.c`, `soapServer.c`, etc.) prin `soapcpp2 -S -c -x sclient.h`.
-
 ---
 
-## Configurare
+## 5. Configurare
 
-Serverul citește `server.cfg` la pornire via **libconfig**. Orice cheie lipsă din fișier este înlocuită cu valoarea implicită compilată în `config.c`.
+Serverul citește parametrii din fișierul `server.cfg` prin biblioteca **libconfig**. Orice parametru lipsă este înlocuit intern de o valoare *fallback* compilată în C.
 
 ```cfg
 server:
@@ -100,240 +97,96 @@ server:
     backlog     = 10;
     reuse_addr  = 1;
 };
-
 logging:
 {
     level       = 1;   # 0=erori, 1=info, 2=debug
-    destination = "stderr";
 };
-
-demo:
-{
-    input_string = "Hello from libconfig!";
-    input_int1   = 42;
-    input_int2   = 58;
-};
-
 solver:
 {
-    workers          = 4;   # procese copil pentru rezolvare paralelă
-    serial_threshold = 32;  # sub acest n se rezolvă serial (fără fork)
+    workers          = 4;   # Câți workeri (procese fork) rezolvă o matrice concomitent
+    serial_threshold = 32;  # Dacă N < 32, ocolește fork() și folosește algoritmul serial LAPACKE
 };
 ```
 
-### Argumente CLI
+Puteți suprascrie configurațiile direct din **CLI**:
+`./serverds --port 9090 --soap-port 8080 --log-level 2`
 
-Argumentele CLI suprascriu valorile din fișierul de configurare.
-
-| Flag scurt | Flag lung | Descriere | Default |
-|---|---|---|---|
-| `-c` | `--config <path>` | Calea către fișierul .cfg | `server.cfg` |
-| `-p` | `--port <n>` | Port INET/TCP | `18081` |
-| `-s` | `--soap-port <n>` | Port SOAP | `18082` |
-| `-u` | `--unix-socket <path>` | Cale socket UNIX | `/tmp/unixds` |
-| `-l` | `--log-level <0\|1\|2>` | Verbozitate log | `1` |
-| `-h` | `--help` | Afișează help | — |
-
-### Variabile de mediu
-
-| Variabilă | Efect |
-|---|---|
-| `PCD_CONFIG` | Suprascrie calea default a fișierului de configurare |
-| `PCD_LOG_LEVEL` | Setează log level-ul înainte de parsarea CLI |
-
-**Ordinea de prioritate:** CLI > variabile de mediu > `server.cfg` > valori implicite
+Sau folosind **Variabile de Mediu**:
+`PCD_CONFIG=alt_fisier.cfg PCD_LOG_LEVEL=2 ./serverds`
 
 ---
 
-## Rulare
+## 6. Rulare și Exemple de Utilizare
 
-### Server
+### Pornirea Serverului
 
 ```bash
-# Rulare cu configurare implicită
 ./serverds
-
-# Port INET custom + log debug
-./serverds --port 9090 --log-level 2
-
-# Fișier de configurare alternativ
-./serverds --config /etc/pcd/myserver.cfg
-
-# Via variabile de mediu
-PCD_CONFIG=myserver.cfg PCD_LOG_LEVEL=2 ./serverds
 ```
 
-### Client INET general
+### Clientul de Ecuații Liniar (Demonstrația Principală)
 
+Clientul suportă sisteme de ordinul 1, 2 sau 3 (date ca argumente text). Sistemul parsează ecuațiile, le transformă într-o matrice binară și roagă serverul să o calculeze.
+
+**Sistem de Ordin 2:**
+```bash
+./equation_type1_client -n 2 "2x+3y=7" "x+2y=4"
+```
+*Output așteptat:*
+```text
+[client] Sistem de ordin 2:
+  Ec 1: 2x +3y = 7
+  Ec 2: 1x +2y = 4
+[client] Conectat la 127.0.0.1:18081
+
+[REZULTAT]
+  x = 2.000000
+  y = 1.000000
+```
+
+**Sistem de Ordin 3 (cu coeficienți impreciși/negativi):**
+```bash
+./equation_type1_client -n 3 "x+y+z=6" "2x-y+z=3" "x+2y-z=2"
+```
+
+### Clientul Generic INET
+
+Acest client se conectează la server și testează serializarea primară, concatenarea stringurilor și operațiile matematice elementare.
 ```bash
 ./inetclient
-./inetclient --host 192.168.1.10 --port 18081
-```
-
-### Client T26 — Linear System Solver
-
-```bash
-# Sistem 4×4 (default) — soluție afișată cu eroare numerică
-./solve_client
-
-# Sistem 200×200
-./solve_client -n 200
-
-# Serverul pe altă mașină
-./solve_client -h 192.168.1.10 -p 18081 -n 100
+./inetclient --host 127.0.0.1 --port 18081
 ```
 
 ---
 
-## Arhitectura serverului
+## 7. Protocolul binar INET (FCE)
 
-```
-main() — threeds.c
-│
-├── config_load("server.cfg")      ← libconfig
-├── config_apply_args(...)         ← CLI / env vars
-├── demo_fork()                    ← fork() + pipe + wait()
-│
-├── pthread_create → unix_main()   ← UNIX domain socket  (:unix_socket)
-├── pthread_create → inet_main()   ← TCP/INET select()   (:inet_port)
-└── pthread_create → soap_main()   ← gsoap               (:soap_port)
-```
+Protocolul personalizat funcționează prin trimiterea unui **Header fix de 12 bytes** la începutul oricărui mesaj. Valorile din header sunt formatate conform **Network Byte Order**.
 
----
-
-## Protocolul binar INET
-
-Fiecare mesaj are un **header fix de 12 bytes** urmat de un payload variabil:
-
-```
+```text
 ┌──────────────┬──────────────┬──────────────┐
 │  msgSize     │  clientID    │  opID        │
-│  (4 bytes)   │  (4 bytes)   │  (4 bytes)   │
+│  (int32_t)   │  (int32_t)   │  (int32_t)   │
 └──────────────┴──────────────┴──────────────┘
 ```
 
-Valorile din header sunt în **network byte order**. Matricele/vectorii din OPR_SOLVE sunt în **native byte order** (IEEE 754 little-endian pe x86/ARM64 Linux).
-
-### Operații
-
-| Cod | Constantă | Request | Response |
-|-----|-----------|---------|----------|
-| 0 | `OPR_CONNECT` | `singleInt(0)` | `singleInt(clientID)` |
-| 1 | `OPR_ECHO` | `singleString(s)` | `singleString(s)` |
-| 2 | `OPR_CONC` | `singleString(s1)` + `singleString(s2)` | `singleString(s1+" "+s2)` |
-| 3 | `OPR_NEG` | `singleInt(n)` | `singleInt(-n)` |
-| 4 | `OPR_ADD` | `multiInt(a, b)` | `singleInt(a+b)` |
-| 5 | `OPR_BYE` | `singleInt(0)` | *(conexiunea se închide)* |
-| 6 | `OPR_SOLVE` | `solveRequestHeader` + `A[n×n]` + `b[n]` | `solveResponseHeader` + `x[n]` |
+Operațiunea centrală este `OPR_SOLVE = 6`. 
+1. Clientul transmite: `[Header]` + `[n (ordinul)]` + `[Matricea A n*n doubles]` + `[Vector b n doubles]`.
+2. Serverul răspunde: `[Header]` + `[Status]` + `[Vector x n doubles]`. (Valorile double utilizează arhitectura nativă IEEE 754).
 
 ---
 
-## T26 — Solver sisteme liniare
+## 8. T26 — Solver sisteme liniare (Arhitectura Matematică)
 
-### Problema
+Când serverul primește cererea `OPR_SOLVE` pe thread-ul INET, acesta apelează `solver_solve()` din `solver.c`.
 
-Se rezolvă sistemul `Ax = b` unde `A` este o matrice densă `n×n` și `b` un vector de lungime `n`.
+### A. Calea Paralelă (Eliminare Gaussiană Multi-Proces)
+Dacă ordinul `N >= serial_threshold` și avem > 1 workers alocați:
+1. Părintele construiește o matrice augmentată $[A|b]$.
+2. Părintele folosește `pipe()` și creează $W$ Workeri (`fork()`).
+3. Matricea este împărțită pe orizontală în $W$ benzi. Fiecărui proces copil îi este asigurat un set de rânduri pe care va lucra.
+4. **Eliminarea:** Se iterează prin $n$ pași. Procesul care deține "rândul pivot" la pasul curent îl transmite Părintelui, care face un *broadcast* în pipe-uri către ceilalți workeri. Aceștia reduc elementele de sub diagonala principală pe benzile lor.
+5. La final, Părintele recuperează matricea superior-triunghiulară și rezolvă substitutia înapoi (Back-Substitution) pentru a genera răspunsul.
 
-### Librăria externă: LAPACKE (OpenBLAS)
-
-**LAPACKE** este interfața C pentru LAPACK. Funcția centrală:
-
-```c
-lapack_int LAPACKE_dgesv(
-    int matrix_layout,   // LAPACK_ROW_MAJOR
-    lapack_int n,        // ordinul sistemului
-    lapack_int nrhs,     // 1 pentru un singur b
-    double *A,           // matricea — suprascrisă cu factorii LU
-    lapack_int lda,      // leading dimension = n
-    lapack_int *ipiv,    // vector pivot (output)
-    double *B,           // RHS — suprascris cu soluția x
-    lapack_int ldb       // 1
-);
-```
-
-Algoritmul intern este **descompunerea LU cu pivotare parțială**, cu complexitate `O(n³/3)`, numeric stabilă.
-
-### Strategia de paralelizare (fork + pipe)
-
-```
-parent
-  │
-  ├── fork() → worker 0 → LAPACKE_dgesv pe banda [0,   n/4)  → pipe → x[0..n/4)
-  ├── fork() → worker 1 → LAPACKE_dgesv pe banda [n/4, n/2)  → pipe → x[n/4..n/2)
-  ├── fork() → worker 2 → LAPACKE_dgesv pe banda [n/2, 3n/4) → pipe → x[n/2..3n/4)
-  └── fork() → worker 3 → LAPACKE_dgesv pe banda [3n/4, n)   → pipe → x[3n/4..n)
-        │
-        └── waitpid() pe toți → asamblare x complet
-```
-
-Fiecare worker primește întreaga matrice `A` și banda sa din `b`. Construiește un RHS de lungime `n` cu zeros în afara benzii proprii, apelează `LAPACKE_dgesv`, și trimite înapoi prin pipe doar intrările din banda sa din soluție.
-
-**Calea serială** se folosește automat când `n < serial_threshold` (default 32) sau `workers = 1`.
-
-### Format wire OPR_SOLVE
-
-```
-CLIENT → SERVER:
-  [12 bytes] msgHeaderType    opID = 6
-  [ 4 bytes] int32_t n        ordinul sistemului (network byte order)
-  [8·n² bytes] double A[]    row-major, native byte order
-  [8·n  bytes] double b[]    native byte order
-
-SERVER → CLIENT:
-  [12 bytes] msgHeaderType    opID = 6
-  [ 4 bytes] int32_t status   0=ok | -1=singular | -2=alloc | -3=IPC
-  [8·n  bytes] double x[]    doar dacă status == 0
-```
-
-### Exemplu output solve_client
-
-```
-[client] Connected to 127.0.0.1:18081
-[client] ClientID = 1713612345
-[client] System order n=4
-[client] Expected solution x:
-  1.0000  2.0000  3.0000  4.0000
-[client] Sending OPR_SOLVE request...
-x = [
-  x[0] =     1.000000   (expected     1.000000, err = 3.55e-15)
-  x[1] =     2.000000   (expected     2.000000, err = 7.11e-15)
-  x[2] =     3.000000   (expected     3.000000, err = 0.00e+00)
-  x[3] =     4.000000   (expected     4.000000, err = 4.44e-15)
-]
-Max absolute error: 7.105427e-15  ✓ PASS
-```
-
----
-
-## Demo Milestone 1
-
-La fiecare pornire, înainte de a lansa thread-urile, serverul execută un demo `fork()`/`wait()` care ilustrează utilizarea libconfig, comunicarea prin pipe și recolectarea procesului copil:
-
-```
-[main] Running fork()/wait() demo...
-[demo] fork()/wait() results from child (PID 12345):
-       42 + 58 = 100
-       -(42)   = -42
-       echo    = "Hello from libconfig!"
-```
-
-Valorile provin din secțiunea `demo` a fișierului `server.cfg`.
-
----
-
-## Modificări față de skeleton
-
-| Fișier | Modificare |
-|--------|-----------|
-| `solver.h` / `solver.c` | **NOU** — solver T26: LAPACKE serial + fork paralel |
-| `solve_client.c` | **NOU** — client de test dedicat OPR_SOLVE cu verificare numerică |
-| `config.h` / `config.c` | **NOU** — integrare libconfig + câmpuri `solver_workers`, `solver_threshold` |
-| `server.cfg` | **NOU** — fișier de configurare cu secțiunile server/logging/demo/solver |
-| `proto.h` | Adăugat `OPR_SOLVE = 6`, structuri matrice, declarații helpere wire |
-| `proto.c` | Adăugat 4 helpere pentru protocolul OPR_SOLVE |
-| `inetds2.c` | Fix OPR_CONC (stub → implementat), fix malloc overflow, eliminat ncurses, adăugat `case OPR_SOLVE` |
-| `threeds.c` | Rescris: getopt_long, getenv, config_load, demo_fork, pthread_create |
-| `unixds.c` | SOCK_DGRAM → SOCK_STREAM, adăugat loop accept()/select() |
-| `soapds.c` | Eliminat ncurses, unused-param warnings rezolvate |
-| `inetsample2.c` | Adăugat getopt, test OPR_CONC, error handling complet |
-| `makefile` | Adăugat `-llapacke -lopenblas -lm`, `solver.o`, target `solve_client` și `deps` |
+### B. Calea Serială (Fallback Stabil)
+Dacă ecuația este prea mică ($N < 32$), overhead-ul sistemului de operare (schimb de context IPC/fork) nu se justifică. Astfel, sistemul rezolvă matematic matrizile delegând procesarea către `LAPACKE_dgesv` (o rutină din OpenBLAS extrem de stabilă numeric pentru descompunere LU).
